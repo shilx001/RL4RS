@@ -2,10 +2,11 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 import datetime
-import ddpg
+from ddpg import *
 import math
 import pickle
 
+np.random.seed(1)
 data = pd.read_csv('ml-latest-small/ratings.csv')
 user_idx = data['userId'].unique()  # id for all the user
 np.random.shuffle(user_idx)
@@ -71,8 +72,8 @@ for idx in movie_id:
     action_mask_set.append(action_mapping(idx))
 
 MAX_SEQ_LENGTH = 32
-agent = ddpg.DDPG(a_dim=output_action_dim, s_dim=len(train_id) + 1, max_seq_length=MAX_SEQ_LENGTH,
-                  a_bound=output_action_bound)
+agent = DDPG(state_dim=len(train_id) + 1, action_dim=int(output_action_dim), action_bound=output_action_bound,
+             max_seq_length=MAX_SEQ_LENGTH)
 
 print('Start training.')
 start_time = datetime.datetime.now()
@@ -106,16 +107,15 @@ for id1 in train_id:
         done = 0
         if i is len(state) - 1:
             done = 1
-        agent.store_transition(current_state, current_state_length, current_action, current_reward, next_state,
-                               next_state_length, done)
-
-for i in range(1000):
-    a_loss, c_loss = agent.learn()
-    print('Step #', global_step)
+        agent.store(current_state, current_state_length, current_action, current_reward, next_state,
+                    next_state_length, done)
+    memory_length = agent.replay_buffer.get_size()
+    a_loss, c_loss = agent.train(int(memory_length / 32))
+    print('Step ', global_step)
     print('Actor loss: ', a_loss)
     print('Critic loss: ', c_loss)
-    print('######')
     global_step += 1
+
 print('Training finished.')
 end_time = datetime.datetime.now()
 print('Training time(seconds):', (end_time - start_time).seconds)
@@ -153,7 +153,7 @@ for idx1 in test_id:  # 针对test_id中的每个用户
             temp_state = all_state[:-1]
             if len(temp_state) > MAX_SEQ_LENGTH:
                 temp_state = temp_state[-MAX_SEQ_LENGTH:]
-            proto_action = agent.choose_action(temp_state, len(temp_state))  # DDPG-knn输出的Proto action
+            proto_action = agent.get_action(temp_state, len(temp_state))  # DDPG-knn输出的Proto action
             # 根据proto_action找K个最近的动作
             dist = np.sqrt(np.sum(
                 (np.array(action_mask_set).reshape([-1, int(output_action_dim)]) - proto_action.flatten()) ** 2,
@@ -161,13 +161,21 @@ for idx1 in test_id:  # 针对test_id中的每个用户
             sorted_index = np.argsort(dist)
             nearest_index = sorted_index[:K]
             # 评估nearest_index的value
-            critic_value = []
+            eval_state = []
+            eval_length = []
+            eval_action = []
+            # 对temp_state进行补0
+            temp_length = len(temp_state)
+            if len(temp_state) < MAX_SEQ_LENGTH:
+                padding_mat = np.zeros([MAX_SEQ_LENGTH - len(temp_state), len(train_id) + 1])
+                temp_state = np.vstack((temp_state, padding_mat))
             for idx3 in nearest_index:
-                temp_action = np.array(action_mask_set[idx3])
-                q = agent.eval_critic(temp_state, len(temp_state), temp_action)
-                critic_value.append(q)
+                eval_state.append(temp_state)
+                eval_action.append(np.array(action_mask_set[idx3]))
+                eval_length.append(temp_length)
+            critic_value = agent.eval_critic(eval_state, eval_length, eval_action)
             # 推荐Q值最高的N个
-            recommend_index = nearest_index[np.argsort(np.array(critic_value).flatten())[:N]]
+            recommend_index = nearest_index[np.argsort(critic_value.flatten())[:N]]
             recommend_movie = list(movie_id[recommend_index])  # 转为list
             # 针对每个推荐item评估下
             if row['movieId'] in recommend_movie:

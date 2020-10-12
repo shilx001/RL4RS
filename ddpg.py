@@ -1,167 +1,252 @@
 import numpy as np
 import tensorflow as tf
+import tensorflow.contrib.slim as slim
 import collections
 
-################## hyper parameters ##################
 
-LR_A = 0.001
-LR_C = 0.0001
-GAMMA = 0.99
-TAU = 0.001
-MEMORY_CAPACITY = 1000000
-BATCH_SIZE = 32
-HIDDEN_SIZE = 64
-REPLAY_START = 100
-STD_DEV = 0.01
-tf.set_random_seed(1)
+class ReplayBuffer(object):
+    def __init__(self, max_len=100000):
+        self.storage = collections.deque(maxlen=max_len)
+
+    # Expects tuples of (state, next_state, action, reward, done)
+    def add(self, data):
+        self.storage.append(data)
+
+    def sample(self, batch_size=32):
+        ind = np.random.randint(0, len(self.storage), size=batch_size)
+        s1, s1_length, a, r, s2, s2_length, done = [], [], [], [], [], [], []
+
+        for i in ind:
+            d1, d2, d3, d4, d5, d6, d7 = self.storage[i]
+            s1.append(np.array(d1, copy=False))
+            s1_length.append(np.array(d2, copy=False))
+            a.append(np.array(d3, copy=False))
+            r.append(np.array(d4, copy=False))
+            s2.append(np.array(d5, copy=False))
+            s2_length.append(np.array(d6, copy=False))
+            done.append(np.array(d7, copy=False))
+
+        return np.array(s1), np.array(s1_length), np.array(a), np.array(r), np.array(s2), np.array(s2_length), np.array(
+            done)
+
+    def get_size(self):
+        return len(self.storage)
+
+    def clear(self):
+        self.storage.clear()
 
 
-################## DDPG algorithm ##################
+class Actor(object):
+    def __init__(self, sess, state_dim, action_dim, action_bound, learning_rate, tau, batch_size, hidden_size,
+                 namescope='default', max_seq_length=32, base=2):
+        self.sess = sess
+        self.s_dim = state_dim
+        self.a_dim = action_dim
+        self.action_bound = action_bound
+        self.learning_rate = learning_rate
+        self.tau = tau
+        self.batch_size = batch_size
+        self.hidden_size = hidden_size
+        self.namescope = namescope
+        self.max_seq_length = max_seq_length
+        self.base = base
+
+        self.inp = tf.placeholder(shape=[None, self.max_seq_length, self.s_dim], dtype=tf.float64,
+                                  name=self.namescope + '_inp')  # 输入state
+
+        self.length = tf.placeholder(tf.int32, [None])  # 序列长度
+
+        self.out, self.scaled_out = self.create_actor_network(self.namescope + 'main_actor')  # 输出动作，和输入的状态
+
+        self.network_params = tf.trainable_variables()  # actor的所有数据
+
+        self.target_out, self.target_scaled_out = self.create_actor_network(
+            self.namescope + 'target_actor')  # 创建targetnetwork
+
+        self.target_network_params = tf.trainable_variables()[
+                                     len(self.network_params):]  # 按照创建的顺序构建的
+
+        self.update_target_network_params = \
+            [self.target_network_params[i].assign(tf.multiply(self.network_params[i], self.tau) +
+                                                  tf.multiply(self.target_network_params[i], 1. - self.tau))
+             for i in range(len(self.target_network_params))]
+
+    def create_actor_network(self, scope, reuse=False):
+        with tf.variable_scope(scope, reuse=reuse):
+            s = self.inp
+            basic_cell = tf.contrib.rnn.BasicRNNCell(num_units=self.hidden_size)
+            _, net = tf.nn.dynamic_rnn(basic_cell, s, dtype=tf.float64, sequence_length=self.length)
+            net = slim.fully_connected(net, self.hidden_size, activation_fn=tf.nn.relu,
+                                       weights_initializer=tf.truncated_normal_initializer(stddev=0.1))
+            net = slim.fully_connected(net, self.hidden_size, activation_fn=tf.nn.relu)
+            net = slim.fully_connected(net, int(self.a_dim), activation_fn=tf.nn.tanh)
+            scaled_out = (net + 1) * self.action_bound  # action空间要变掉
+            return net, scaled_out
+
+    def update_target_network(self):
+        self.sess.run(self.update_target_network_params)
+
+    def predict(self, inputs, length):
+        return self.sess.run(self.scaled_out, feed_dict={
+            self.inp: inputs, self.length: length
+        })
+
+    def predict_target(self, inputs, length):  # 预测
+        return self.sess.run(self.target_scaled_out, feed_dict={
+            self.inp: inputs, self.length: length
+        })
+
+
+class Critic(object):
+    def __init__(self, sess, state_dim, action_dim, learning_rate, tau, inp_actions, hidden_size, namescope='default',
+                 max_seq_length=32):
+        self.sess = sess
+        self.s_dim = state_dim
+        self.a_dim = action_dim
+        self.learning_rate = learning_rate
+        self.tau = tau
+        self.inp_actions = inp_actions
+        self.hidden_size = hidden_size
+        self.namescope = namescope
+        self.max_seq_length = max_seq_length
+        tf.set_random_seed(1)
+
+        self.inp = tf.placeholder(shape=[None, self.max_seq_length, self.s_dim], dtype=tf.float64)
+        self.action = tf.placeholder(shape=[None, self.a_dim], dtype=tf.float64)
+        self.length = tf.placeholder(dtype=tf.int32, shape=[None])
+
+        self.total_out = self.create_critic_network(self.namescope + 'main_critic', self.inp_actions)
+        self.out = self.create_critic_network(self.namescope + 'main_critic', self.action,
+                                              reuse=True)  # 要重用里面的变量，所以要设为true,创建时参数一样
+
+        self.target_out = self.create_critic_network(self.namescope + 'target_critic', self.action)
+
+        self.network_params = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, self.namescope + 'main_critic')
+        self.target_network_params = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES,
+                                                       self.namescope + 'target_critic')  # 得到target的variables
+        self.update_target_network_params = \
+            [self.target_network_params[i].assign(tf.multiply(self.network_params[i], self.tau) +
+                                                  tf.multiply(self.target_network_params[i], 1. - self.tau))
+             for i in range(len(self.target_network_params))]
+
+        self.predicted_q_value = tf.placeholder(tf.float64, [None, 1])
+
+        self.loss = tf.reduce_mean(tf.square(self.out - self.predicted_q_value))
+        self.train_step = tf.train.AdamOptimizer(self.learning_rate).minimize(self.loss, var_list=self.network_params)
+
+    def create_critic_network(self, scope, actions, reuse=False):
+        with tf.variable_scope(scope, reuse=reuse):
+            basic_cell = tf.contrib.rnn.BasicRNNCell(num_units=self.hidden_size)
+            _, states = tf.nn.dynamic_rnn(basic_cell, self.inp, dtype=tf.float64, sequence_length=self.length)
+            input_s = tf.reshape(states, [-1, self.hidden_size])
+            net = tf.concat([input_s, actions], axis=1)
+            net = slim.fully_connected(net, self.hidden_size)
+            net = slim.fully_connected(net, self.hidden_size)
+            net = slim.fully_connected(net, 1, activation_fn=None)
+        return net
+
+    def update_target_network(self):
+        self.sess.run(self.update_target_network_params)
+
+    def predict(self, inputs, length, action):
+        return self.sess.run(self.out, feed_dict={
+            self.inp: inputs,
+            self.action: action,
+            self.length: length
+        })
+
+    def predict_target(self, inputs, length, action):
+        return self.sess.run(self.target_out, feed_dict={
+            self.inp: inputs,
+            self.action: action,
+            self.length: length
+        })
+
 
 class DDPG(object):
-    def __init__(self, a_dim, s_dim, max_seq_length, a_bound):
-        '''
-        :param a_dim: action dimension
-        :param s_dim: state dimension
-        :param max_seq_length: maximum sequence length for RNN
-        :param a_bound: action bound
-        '''
-        self.memory = collections.deque(maxlen=MEMORY_CAPACITY)  # use deque to store transitions.
+    def __init__(self, state_dim, action_dim, action_bound=1, discount_factor=0.99,
+                 seed=1, actor_lr=1e-3, critic_lr=1e-3, batch_size=32, namescope='default',
+                 tau=0.005, policy_noise=0.1, noise_clip=0.5, hidden_size=64, max_seq_length=32,
+                 memory_capacity=100000):
+        np.random.seed(int(seed))
+        tf.set_random_seed(seed)
+        self.state_dim = state_dim
+        self.action_dim = action_dim
+        self.policy_noise = policy_noise
+        self.noise_clip = noise_clip
+        self.discount_factor = discount_factor
+        self.batch_size = batch_size
         self.sess = tf.Session()
-        self.a_dim, self.s_dim, self.a_bound, self.max_seq_length = a_dim, s_dim, a_bound, max_seq_length
-        self.replay_start = REPLAY_START
-        self.S1 = tf.placeholder(tf.float64, [None, self.max_seq_length, self.s_dim])
-        self.S1_length = tf.placeholder(tf.int32, [None])
-        self.S2 = tf.placeholder(tf.float64, [None, self.max_seq_length, self.s_dim])
-        self.S2_length = tf.placeholder(tf.int32, [None])
-
-        self.R = tf.placeholder(tf.float64, [None, ], name='reward')
-        self.output_action = self._build_a(self.S1, self.S1_length)  # 输出action,不是实际的action
-        self.done = tf.placeholder(tf.float64, [None, ], name='done')
-        self.a = tf.placeholder(tf.float64, [None, self.a_dim])
-        q = self._build_c(self.S1, self.S1_length, self.output_action)
-        a_params = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, scope='Actor')
-        c_params = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, scope='Critic')
-        ema = tf.train.ExponentialMovingAverage(decay=1 - TAU)
-
-        def ema_getter(getter, name, *args, **kwargs):
-            return ema.average(getter(name, *args, **kwargs))
-
-        target_update = [ema.apply(a_params), ema.apply(c_params)]
-        a_ = self._build_a(self.S2, self.S2_length, reuse=True, custom_getter=ema_getter)  # replaced target parameters
-        q_ = self._build_c(self.S2, self.S2_length, a_, reuse=True, custom_getter=ema_getter)
-
-        self.a_loss = - tf.reduce_mean(q)  # maximize the q, 这里我改为reduce_sum
-        self.atrain = tf.train.AdamOptimizer(LR_A).minimize(self.a_loss, var_list=a_params)
-
-        with tf.control_dependencies(target_update):  # soft replacement happened at here
-            self.predict_q = self._build_c(self.S1, self.S1_length, self.a, reuse=True)
-            q_target = self.R + (1 - self.done) * GAMMA * q_
-            td_error = tf.losses.mean_squared_error(labels=q_target, predictions=self.predict_q)
-            self.c_loss = td_error
-            self.ctrain = tf.train.AdamOptimizer(LR_C).minimize(td_error, var_list=c_params)
+        self.hidden_size = hidden_size
+        self.max_seq_length = max_seq_length
+        self.actor = Actor(self.sess, state_dim, action_dim, action_bound,
+                           actor_lr, tau, int(batch_size), self.hidden_size, namescope=namescope + str(seed),
+                           max_seq_length=max_seq_length)
+        self.critic = Critic(self.sess, state_dim, action_dim, critic_lr, tau,
+                             self.actor.scaled_out, self.hidden_size, namescope=namescope + str(seed),
+                             max_seq_length=max_seq_length)
+        self.actor_loss = -tf.reduce_mean(self.critic.total_out)
+        self.actor_train_step = tf.train.AdamOptimizer(actor_lr).minimize(self.actor_loss,
+                                                                          var_list=self.actor.network_params)
+        self.action_bound = action_bound
         self.sess.run(tf.global_variables_initializer())
+        self.replay_buffer = ReplayBuffer(memory_capacity)
 
-    def choose_action(self, s, length):
-        s = np.array(s).reshape([length, self.s_dim])
+    def train(self, iterations):
+        actor_loss, critic_loss = [], []
+        for i in range(iterations):
+            s1, s1_length, a, r, s2, s2_length, done = self.replay_buffer.sample(self.batch_size)
+            temp_action = np.reshape(self.actor.predict_target(s2, s2_length), [self.batch_size, -1])  # 要加入length参数
+            next_action = temp_action
+            target_q = self.critic.predict_target(s2, s2_length, next_action)
+
+            y_i = np.reshape(r, [self.batch_size, 1]) + (1 - np.reshape(done, [self.batch_size,
+                                                                               1])) * self.discount_factor * np.reshape(
+                target_q, [self.batch_size, 1])
+
+            # 需要加入length
+            c_loss, _ = self.sess.run([self.critic.loss, self.critic.train_step],
+                                      feed_dict={self.critic.inp: s1,
+                                                 self.critic.length: s1_length,
+                                                 self.critic.action: np.reshape(
+                                                     a, [self.batch_size,
+                                                         int(self.action_dim)]),
+                                                 self.critic.predicted_q_value: np.reshape(
+                                                     y_i, [-1, 1])})
+            a_loss, _ = self.sess.run([self.actor_loss, self.actor_train_step],
+                                      feed_dict={self.actor.inp: s1, self.actor.length: s1_length,
+                                                 self.critic.inp: s1, self.critic.length: s1_length})
+            self.actor.update_target_network()
+            self.critic.update_target_network()
+            actor_loss.append(a_loss)
+            critic_loss.append(c_loss)
+        return np.mean(actor_loss), np.mean(critic_loss)
+
+    def get_action(self, s, length):
+        s = np.array(s).reshape([length, self.state_dim])
         if length < self.max_seq_length:  # 补0
-            padding_mat = np.zeros([self.max_seq_length - length, self.s_dim])
+            padding_mat = np.zeros([self.max_seq_length - length, self.state_dim])
             s = np.vstack((s, padding_mat))
-        return self.sess.run(self.output_action,
-                             feed_dict={self.S1: np.reshape(s, [-1, self.max_seq_length, self.s_dim]),
-                                        self.S1_length: [length]})
+        return self.actor.predict(np.reshape(s, [-1,self.max_seq_length, self.actor.s_dim]), [length])
 
-    def learn(self):
-        if len(self.memory) < self.replay_start:
-            return 0, 0
-        all_index = np.random.choice(len(self.memory), BATCH_SIZE, replace=False)  # 得到所有的index
-        sample_s1 = []
-        sample_s1_length = []
-        sample_action = []
-        sample_reward = []
-        sample_s2 = []
-        sample_s2_length = []
-        sample_done = []
-        for index in all_index:
-            element = self.memory[index]
-            sample_s1.append(element[0])
-            sample_s1_length.append(element[1])
-            sample_action.append(element[2])
-            sample_reward.append(element[3])
-            sample_s2.append(element[4])
-            sample_s2_length.append(element[5])
-            sample_done.append(element[6])
-        sample_s1 = np.array(sample_s1).reshape([BATCH_SIZE, self.max_seq_length, self.s_dim])
-        sample_s1_length = np.array(sample_s1_length)
-        sample_action = np.array(sample_action).reshape([BATCH_SIZE, int(self.a_dim)])
-        sample_reward = np.array(sample_reward)
-        sample_s2 = np.array(sample_s2).reshape([BATCH_SIZE, self.max_seq_length, self.s_dim])
-        sample_s2_length = np.array(sample_s2_length)
-        sample_done = np.array(sample_done)
-        self.sess.run(self.atrain, feed_dict={self.S1: sample_s1, self.S1_length: sample_s1_length})
-        self.sess.run(self.ctrain, feed_dict={self.S1: sample_s1, self.S1_length: sample_s1_length,
-                                              self.S2: sample_s2, self.S2_length: sample_s2_length,
-                                              self.a: sample_action,
-                                              self.R: sample_reward,
-                                              self.done: sample_done})
-        actor_loss, critic_loss = self.sess.run([self.a_loss, self.c_loss],
-                                                feed_dict={self.S1: sample_s1, self.S1_length: sample_s1_length,
-                                                           self.S2: sample_s2, self.S2_length: sample_s2_length,
-                                                           self.a: sample_action,
-                                                           self.R: sample_reward,
-                                                           self.done: sample_done})
-        return actor_loss, critic_loss
-
-    def eval_critic(self, s, s_length, a):
-        # 根据state和action对critic进行估值
-        s = np.array(s).reshape([s_length, self.s_dim])
-        a = np.reshape(a, [-1, int(self.a_dim)])
-        if s_length < self.max_seq_length:  # 补0
-            padding_mat = np.zeros([self.max_seq_length - s_length, self.s_dim])
-            s = np.vstack((s, padding_mat))
-        return self.sess.run(self.predict_q, feed_dict={self.S1: np.reshape(s, [-1, self.max_seq_length, self.s_dim]),
-                                                        self.S1_length: [s_length], self.a: a})
-
-    def store_transition(self, s1, s1_length, a, r, s2, s2_length, done):
-        # 需要reshape一下，且需要把s1这些给补0掉。
-        s1 = np.array(s1).reshape([s1_length, self.s_dim])
-        s2 = np.array(s2).reshape([s2_length, self.s_dim])
+    def store(self, s1, s1_length, a, r, s2, s2_length, done):  # 存储的时候需要存储length
+        # 需要对state进行padding
+        s1 = np.array(s1).reshape([s1_length, self.state_dim])
+        s2 = np.array(s2).reshape([s2_length, self.state_dim])
         if s1_length < self.max_seq_length:  # 补0
-            padding_mat = np.zeros([self.max_seq_length - s1_length, self.s_dim])
+            padding_mat = np.zeros([self.max_seq_length - s1_length, self.state_dim])
             s1 = np.vstack((s1, padding_mat))
         if s2_length < self.max_seq_length:
-            padding_mat = np.zeros([self.max_seq_length - s2_length, self.s_dim])
+            padding_mat = np.zeros([self.max_seq_length - s2_length, self.state_dim])
             s2 = np.vstack((s2, padding_mat))
-        transition = (s1, s1_length, a, r, s2, s2_length, done)
-        self.memory.append(transition)
 
-    def _build_a(self, s, s_length, reuse=None, custom_getter=None):
-        trainable = True if reuse is None else False
-        with tf.variable_scope('Actor', reuse=reuse, custom_getter=custom_getter):
-            basic_cell = tf.contrib.rnn.BasicRNNCell(num_units=HIDDEN_SIZE)
-            #basic_cell = tf.contrib.rnn.BasicLSTMCell(num_units=HIDDEN_SIZE)
-            _, states = tf.nn.dynamic_rnn(basic_cell, s, dtype=tf.float64, sequence_length=s_length)
-            h1 = tf.layers.dense(states, units=HIDDEN_SIZE, activation=tf.nn.relu, trainable=trainable,
-                                 kernel_initializer=tf.truncated_normal_initializer(stddev=STD_DEV))
-            h2 = tf.layers.dense(h1, units=HIDDEN_SIZE, activation=tf.nn.relu, trainable=trainable,
-                                 kernel_initializer=tf.truncated_normal_initializer(stddev=STD_DEV))
-            h3 = tf.layers.dense(h2, units=self.a_dim, activation=tf.nn.tanh, trainable=trainable,
-                                 kernel_initializer=tf.truncated_normal_initializer(stddev=STD_DEV))
-            return (h3 + 1) * self.a_bound  # output range should scale to [0, self.a.bound]
+        self.replay_buffer.add((s1, s1_length, a, r, s2, s2_length, done))
 
-    def _build_c(self, s, s_length, a, reuse=None, custom_getter=None):
-        trainable = True if reuse is None else False
-        with tf.variable_scope('Critic', reuse=reuse, custom_getter=custom_getter):
-            basic_cell = tf.contrib.rnn.BasicRNNCell(num_units=HIDDEN_SIZE)  # state representation
-            #basic_cell = tf.contrib.rnn.BasicLSTMCell(num_units=HIDDEN_SIZE)
-            _, states = tf.nn.dynamic_rnn(basic_cell, s, dtype=tf.float64, sequence_length=s_length)
-            input_s = tf.reshape(states, [-1, HIDDEN_SIZE])
-            input_a = tf.reshape(a, [-1, int(self.a_dim)])
-            input_all = tf.concat([input_s, input_a], axis=1)
-            h1 = tf.layers.dense(input_all, units=HIDDEN_SIZE, activation=tf.nn.relu, trainable=trainable,
-                                 kernel_initializer=tf.truncated_normal_initializer(stddev=STD_DEV))
-            h2 = tf.layers.dense(h1, units=HIDDEN_SIZE, activation=tf.nn.relu, trainable=trainable,
-                                 kernel_initializer=tf.truncated_normal_initializer(stddev=STD_DEV))
-            h3 = tf.layers.dense(h2, units=1, activation=None, trainable=trainable,
-                                 kernel_initializer=tf.truncated_normal_initializer(stddev=STD_DEV))
-            return h3
+    def get_params(self):
+        return self.sess.run(self.actor.network_params[:len(self.actor.network_params)])
+
+    def eval_critic(self, s, s_length, a):
+        s = np.array(s).reshape([-1, self.max_seq_length, self.state_dim])
+        s_length = np.array(s_length).flatten()
+        a = np.reshape(a, [-1, int(self.action_dim)])
+        return self.critic.predict(s, s_length, a)
