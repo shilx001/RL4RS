@@ -1,24 +1,16 @@
 import numpy as np
 import pandas as pd
-#import matplotlib.pyplot as plt
+import matplotlib.pyplot as plt
 
-np.random.seed(1)
 data = pd.read_csv('ml-latest-small/ratings.csv')
 
-# 统计一下用户的分布
-# hist = data.hist(column='userId',bins=610)
-print('Max rating count of a user: ', np.max(data['userId'].value_counts()))
-print('Min rating count of a user: ', np.min(data['userId'].value_counts()))
-print('Average rating count:', np.mean(data['userId'].value_counts()))
-
+np.random.seed(1)
 user_idx = data['userId'].unique()  # id for all the user
 np.random.shuffle(user_idx)
 train_id = user_idx[:int(len(user_idx) * 0.8)]
 test_id = user_idx[int(len(user_idx) * 0.8):]
 
-# 对训练集中每个电影进行统计，统计其平均得分
-movie_total_rating = []
-movie_count = []
+# 找出集合中有多少个电影。
 movie_id = []
 for idx1 in train_id:  # 针对train_id中的每个用户
     user_record = data[data['userId'] == idx1]
@@ -26,23 +18,34 @@ for idx1 in train_id:  # 针对train_id中的每个用户
         # 检查list中是否有该电影的id
         if row['movieId'] in movie_id:
             idx = movie_id.index(row['movieId'])  # 找到该位置
-            movie_count[idx] += 1  # 计数加一
-            movie_total_rating[idx] += row['rating']
         else:
             # 否则新加入movie_id
             movie_id.append(row['movieId'])
-            movie_count.append(1)
-            movie_total_rating.append(row['rating'])
-print('Total movie count:', len(movie_id))
 
-# 计算average rating并排序
-movie_total_rating = np.array(movie_total_rating)
-movie_count = np.array(movie_count)
-movie_average_rating = movie_total_rating / movie_count
-recommend_index = np.argsort(-movie_average_rating)
-print('Average rating for movies:', np.mean(movie_average_rating))
-print('Average rating count for movies:', np.mean(movie_count))
+# 针对训练集建立user-rating matrix
+rating_mat = np.zeros([len(train_id), len(movie_id)])
+movie_id = np.array(movie_id)
+for idx in train_id:  # 针对每个train数据
+    record = data[data['userId'] == idx]  # record有多个数据，所以row_index也有多个
+    for _, row in record.iterrows():  # 针对每个用户的每条评分
+        r = np.where(train_id == idx)
+        c = np.where(row['movieId'] == movie_id)
+        rating_mat[r, c] = row['rating']
 
+# 对rating_mat进行SVD
+reduction_dim = 2
+u, s, vt = np.linalg.svd(rating_mat)
+S = np.zeros([len(train_id), len(movie_id)])  # 需要把输出特征值矩阵变换一下
+S[:len(train_id), :len(train_id)] = np.diag(s)
+S = S[:, :reduction_dim]
+vt = vt[:reduction_dim, :]
+svd_rating_mat = u.dot(S.dot(vt))
+
+# 根据SVD评分最高的几个电影进行推荐
+average_rating = np.mean(svd_rating_mat, axis=0)
+recommend_index = np.argsort(-average_rating)
+
+# 对测试数据进行评价
 # 按照popularity进行推荐，并对测试集的reward进行评测。
 result = []  # 评测结果以list进行存储，存储内容为
 k = 30  # 用于评估的top-k参数
@@ -77,7 +80,7 @@ for idx1 in test_id:  # 针对test_id中的每个用户
             cp.append(0)
             cn.append(0)
         rec_count = 0
-        current_recommend = []
+        current_recommend = recommend_index[:k]
         # 针对recommend_index里面所有的电影,找出用户没有看过的k个电影推荐给用户
         for movie_idx in recommend_index:
             if movie_idx in user_watched_list:  # 如果看过，则continue
