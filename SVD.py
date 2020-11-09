@@ -2,7 +2,8 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 
-data = pd.read_csv('ml-latest-small/ratings.csv')
+# data = pd.read_csv('ml-latest-small/ratings.csv')
+data = pd.read_table('ratings.dat', sep='::', names=['userId', 'movieId', 'rating', 'timestep'])
 
 np.random.seed(1)
 user_idx = data['userId'].unique()  # id for all the user
@@ -36,6 +37,7 @@ for idx in train_id:  # 针对每个train数据
 reduction_dim = 2
 u, s, vt = np.linalg.svd(rating_mat)
 S = np.zeros([len(train_id), len(movie_id)])  # 需要把输出特征值矩阵变换一下
+temp_length = len(train_id) if len(train_id)<len(movie_id) else len(movie_id)
 S[:len(train_id), :len(train_id)] = np.diag(s)
 S = S[:, :reduction_dim]
 vt = vt[:reduction_dim, :]
@@ -80,7 +82,7 @@ for idx1 in test_id:  # 针对test_id中的每个用户
             cp.append(0)
             cn.append(0)
         rec_count = 0
-        current_recommend = recommend_index[:k]
+        current_recommend = list(recommend_index[:k])
         # 针对recommend_index里面所有的电影,找出用户没有看过的k个电影推荐给用户
         for movie_idx in recommend_index:
             if movie_idx in user_watched_list:  # 如果看过，则continue
@@ -107,4 +109,4 @@ for idx1 in test_id:  # 针对test_id中的每个用户
         result.append([r + alpha * (cp[-1] - cn[-1]), tp / (tp + fp + 1e-8), tp / (tp + fn + 1e-8)])
 
 print('Result: Reward, Precision, Recall')
-np.mean(np.array(result).reshape([-1, 3]), axis=0)
+print(np.mean(np.array(result).reshape([-1, 3]), axis=0))

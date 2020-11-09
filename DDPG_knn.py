@@ -8,6 +8,8 @@ import pickle
 
 np.random.seed(1)
 data = pd.read_csv('ml-latest-small/ratings.csv')
+#data = pd.read_table('ratings.dat',sep='::',names=['userId','movieId','rating','timestep'])
+
 user_idx = data['userId'].unique()  # id for all the user
 np.random.shuffle(user_idx)
 train_id = user_idx[:int(len(user_idx) * 0.8)]
@@ -115,6 +117,7 @@ for id1 in train_id:
     print('Actor loss: ', a_loss)
     print('Critic loss: ', c_loss)
     global_step += 1
+    agent.replay_buffer.clear()
 
 print('Training finished.')
 end_time = datetime.datetime.now()

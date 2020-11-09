@@ -104,4 +104,4 @@ for idx1 in test_id:  # 针对test_id中的每个用户
         result.append([r + alpha * (cp[-1] - cn[-1]), tp / (tp + fp + 1e-8), tp / (tp + fn + 1e-8)])
 
 print('Result: Reward, Precision, Recall')
-np.mean(np.array(result).reshape([-1, 3]), axis=0)
+print(np.mean(np.array(result).reshape([-1, 3]), axis=0))
