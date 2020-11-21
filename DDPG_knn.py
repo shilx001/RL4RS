@@ -5,7 +5,7 @@ import datetime
 from ddpg_v2 import *
 import math
 import pickle
-
+# DDPG-KNN
 np.random.seed(1)
 data = pd.read_csv('ml-latest-small/ratings.csv')
 #data = pd.read_table('ratings.dat',sep='::',names=['userId','movieId','rating','timestep'])
